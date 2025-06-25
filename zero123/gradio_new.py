@@ -35,7 +35,7 @@ from torchvision import transforms
 _SHOW_DESC = True
 _SHOW_INTERMEDIATE = False
 # _SHOW_INTERMEDIATE = True
-_GPU_INDEX = 0
+_GPU_INDEX = 1
 # _GPU_INDEX = 2
 
 # _TITLE = 'Zero-Shot Control of Camera Viewpoints within a Single Image'
@@ -53,7 +53,7 @@ _ARTICLE = 'See uses.md'
 
 def load_model_from_config(config, ckpt, device, verbose=False):
     print(f'Loading model from {ckpt}')
-    pl_sd = torch.load(ckpt, map_location='cpu')
+    pl_sd = torch.load(ckpt, map_location='cpu', weights_only=False)
     if 'global_step' in pl_sd:
         print(f'Global Step: {pl_sd["global_step"]}')
     sd = pl_sd['state_dict']
@@ -78,11 +78,16 @@ def sample_model(input_im, model, sampler, precision, h, w, ddim_steps, n_sample
     with precision_scope('cuda'):
         with model.ema_scope():
             c = model.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
+            print("c.shape", c.shape)
             T = torch.tensor([math.radians(x), math.sin(
                 math.radians(y)), math.cos(math.radians(y)), z])
+            print("T.shape", T.shape)
             T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device)
+            print("T.shape after T[None, None, :]", T.shape)
             c = torch.cat([c, T], dim=-1)
+            print("c.shape after cat", c.shape)
             c = model.cc_projection(c)
+            print("c.shape after projection", c.shape)
             cond = {}
             cond['c_crossattn'] = [c]
             cond['c_concat'] = [model.encode_first_stage((input_im.to(c.device))).mode().detach()
@@ -565,7 +570,7 @@ def run_demo(
                     label='Relationship between input (green) and output (blue) camera poses')
 
                 gen_output = gr.Gallery(label='Generated images from specified new viewpoint')
-                gen_output.style(grid=2)
+                # gen_output.style(grid=2)
 
                 preproc_output = gr.Image(type='pil', image_mode='RGB',
                                           label='Preprocessed input image', visible=_SHOW_INTERMEDIATE)
@@ -654,9 +659,10 @@ def run_demo(
                                     0.0, 180.0, 0.0),
                        inputs=preset_inputs, outputs=preset_outputs)
 
-    demo.launch(enable_queue=True, share=True)
+    # demo.launch(enable_queue=True, share=True)
+    demo.launch(share=True)
 
 
 if __name__ == '__main__':
-
-    fire.Fire(run_demo)
+    run_demo()
+    # fire.Fire(run_demo)

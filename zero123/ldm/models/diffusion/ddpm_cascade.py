@@ -1,6 +1,8 @@
-# modifying shape of conditioning tensor
-# project camera pose into 768 then concat vertically with image embedding
-# put in conditioning tensor of (1, 2, 768) 
+# take in multiple input images (hybrid attention)
+# pass in multiple input images through CLIP and concat them horizontally like the original code with T
+# put in conditioning tensor of (1, N, 768) where N is the number of images
+# need to use the MultiViewObjaverseDataModuleFromConfig
+# need to change input channels in config to 4 instead of 8
 
 """
 wild mixture of
@@ -31,7 +33,6 @@ from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, Autoenc
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.modules.attention import CrossAttention
-from ldm.modules.evaluate.evaluate import compute_evaluation_metrics
 
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -385,7 +386,11 @@ class DDPM(pl.LightningModule):
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]
-        x = rearrange(x, 'b h w c -> b c h w')
+        elif len(x.shape) == 4:
+            x = rearrange(x, 'b h w c -> b c h w')
+        elif len(x.shape) == 5:
+            x = x.squeeze(0) # remove first dimension
+            x = rearrange(x, 'b h w c -> b c h w')
         x = x.to(memory_format=torch.contiguous_format).float()
         return x
 
@@ -424,8 +429,8 @@ class DDPM(pl.LightningModule):
         with self.ema_scope():
             _, loss_dict_ema = self.shared_step(batch)
             loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
-        self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+        self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
@@ -528,8 +533,7 @@ class LatentDiffusion(DDPM):
         self.cond_stage_forward = cond_stage_forward
 
         # construct linear projection layer for concatenating image CLIP embedding and RT
-        self.cc_projection = nn.Linear(4, 768)
-        # self.cc_projection = nn.Linear(772, 768)
+        self.cc_projection = nn.Linear(772, 768)
         nn.init.eye_(list(self.cc_projection.parameters())[0][:768, :768]) # initialize weights to identity
         nn.init.zeros_(list(self.cc_projection.parameters())[1]) # initialize bias to 0
         self.cc_projection.requires_grad_(True)
@@ -773,14 +777,14 @@ class LatentDiffusion(DDPM):
             batch, self.first_stage_key, return_first_stage_outputs=True, force_c_encode=True, return_original_cond=True
         )
         # xrec: reconstructed images (predictions), x_gt: ground truth images
-
-        metrics = compute_evaluation_metrics(xrec, x_gt, batch["relative_RT4"])
+        
+        metrics = compute_evaluation_metrics(xrec, x_gt)
         print(metrics)
         for k, v in metrics.items():
             loss_dict_no_ema[k] = v
 
-        self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+        self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
     
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
@@ -793,7 +797,7 @@ class LatentDiffusion(DDPM):
         T = batch['T'].to(memory_format=torch.contiguous_format).float()
         
         # trims batch to batch size
-        if bs is not None:
+        if bs is not None: 
             x = x[:bs]
             T = T[:bs].to(self.device)
 
@@ -801,11 +805,14 @@ class LatentDiffusion(DDPM):
         x = x.to(self.device)
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
+
         cond_key = cond_key or self.cond_stage_key # retrieves conditioning input
         xc = super().get_input(batch, cond_key).to(self.device) # rearrange bhwc -> bchw
         if bs is not None:
             xc = xc[:bs]
         cond = {}
+
+        print("xc.shape", xc.shape)
 
         # To support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
         random = torch.rand(x.size(0), device=x.device) # generate tensor with random values
@@ -818,28 +825,16 @@ class LatentDiffusion(DDPM):
         with torch.enable_grad():
             clip_emb = self.get_learned_conditioning(xc).detach()
             null_prompt = self.get_learned_conditioning([""]).detach()
-            T_proj = self.cc_projection(T[:, None, :]) # Project T to match CLIP embedding size
-            cond["c_crossattn"] = [torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T_proj], dim=1)] # concat masked clip embedding and T
-            # cond["c_crossattn"] = [self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T[:, None, :]], dim=-1))] # concat masked clip embedding and T then project
+            cond["c_crossattn"] = [self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T[:, None, :]], dim=-1))] # concat masked clip embedding and T then project
         cond["c_concat"] = [input_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()] # encode xc into latent space, mode extracts most likely value from the distribution, input_mask zeroes out conditioning for certain samples
         
         out = [z, cond]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z) # reconstructed image
             out.extend([x, xrec])
-            print("xrec", xrec.shape)
         if return_original_cond:
             out.append(xc)
 
-        # print("torch.where(prompt_mask, null_prompt, clip_emb)", torch.where(prompt_mask, null_prompt, clip_emb).shape)
-        # print("T", T.shape)
-        # print("T[:, None, :]", T[:, None, :].shape)
-        # print("T_proj", T_proj.shape)
-        # print("cond[c_crossattn]", len(cond["c_crossattn"]), cond["c_crossattn"][0].shape)
-        # print("cond[c_concat]", len(cond["c_concat"]), cond["c_concat"][0].shape)
-        # print("z", z.shape)
-        # print("return_first_stage_outputs", return_first_stage_outputs)
-        # print("out", len(out))
         return out
 
     # @torch.no_grad()
@@ -1132,8 +1127,6 @@ class LatentDiffusion(DDPM):
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
-        self.logvar = self.logvar.to(self.device)
-        t = t.to(self.device)
         logvar_t = self.logvar[t].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
@@ -1422,14 +1415,6 @@ class LatentDiffusion(DDPM):
             raise NotImplementedError()
         c = repeat(c, '1 ... -> b ...', b=batch_size).to(self.device)
         cond = {}
-        print("c.shape", c.shape)
-        if c.dim() == 2:
-            c = c.unsqueeze(1)  # [B, 1, 768]
-        # Repeat or pad to match the expected sequence length (e.g., 2)
-        seq_len = 2  # or whatever your model expects
-        if c.shape[1] < seq_len:
-            c = c.expand(-1, seq_len, -1)
-        print("c.shape", c.shape)
         cond["c_crossattn"] = [c]
         cond["c_concat"] = [torch.zeros([batch_size, 4, image_size // 8, image_size // 8]).to(self.device)]
         return cond
@@ -1663,21 +1648,22 @@ class DiffusionWrapper(pl.LightningModule):
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
-            # c_crossattn dimension:  torch.Size([8, 1, 768]) 1
-            # cc dimension:  torch.Size([8, 1, 768]
             cc = torch.cat(c_crossattn, 1)
-            # print("x shape: ", x.shape,
-            #       "c_concat shape: ", [c.shape for c in c_concat],
-            #       "c_crossattn shape: ", [c.shape for c in c_crossattn])
-            # print(f"cc shape: {cc.shape}")
+            x = x.repeat(1, 2, 1, 1) # very hacky... bc channel should be 8 not 4
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
-            xc = torch.cat([x] + c_concat, dim=1)
+            # xc = torch.cat([x] + c_concat, dim=1)
+            # changed to dim=0 for multi input
+            print("x", x.shape)
+            print("c_concat", c_concat[0].shape)
+            print("c_crossattn", c_crossattn[0].shape)
+            if all(x.shape[i] == c_concat[0].shape[i] for i in range(len(x.shape)) if i != 1):
+                xc = torch.cat([x] + c_concat, dim=1)
+            else:
+                xc = torch.cat([x] + c_concat, dim=0)
             cc = torch.cat(c_crossattn, 1)
-            # print("x shape: ", x.shape,
-            #       "c_concat shape: ", [c.shape for c in c_concat],
-            #       "c_crossattn shape: ", [c.shape for c in c_crossattn])
-            # print(f"xc shape: {xc.shape}, cc shape: {cc.shape}")
+            print("xc", xc.shape)
+            print("cc", cc.shape)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'hybrid-adm':
             assert c_adm is not None

@@ -134,7 +134,7 @@ class DDIMSampler(object):
                       t_start=-1):
         device = self.model.betas.device
         b = shape[0]
-        if x_T is None:
+        if x_T is None: # initial latent image
             img = torch.randn(shape, device=device)
         else:
             img = x_T
@@ -207,6 +207,8 @@ class DDIMSampler(object):
                                 c[k]])
             else:
                 c_in = torch.cat([unconditional_conditioning, c])
+            print("x.shape", x.shape)
+            print("x_in.shape", x_in.shape)
             e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
             e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 

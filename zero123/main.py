@@ -359,6 +359,7 @@ class ImageLogger(Callback):
     def log_local(self, save_dir, split, images,
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
+        print("saving to root", root)
         for k in images:
             grid = torchvision.utils.make_grid(images[k], nrow=4)
             if self.rescale:
@@ -497,8 +498,8 @@ class SingleImageLogger(Callback):
         os.makedirs(root, exist_ok=True)
         for k in images:
             subroot = os.path.join(root, k)
-            os.makedirs(subroot, exist_ok=True)
-            base_count = len(glob.glob(os.path.join(subroot, "*.png")))
+            os.makedirs(subroot, exist_ok=True) # create subdirectory
+            base_count = len(glob.glob(os.path.join(subroot, "*.png"))) # count png files in the subdirectory
             for img in images[k]:
                 if self.rescale:
                     img = (img + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
@@ -512,7 +513,7 @@ class SingleImageLogger(Callback):
                     batch_idx,
                     base_count)
                 path = os.path.join(subroot, filename)
-                Image.fromarray(img).save(path)
+                Image.fromarray(img).save(path) # save images
                 base_count += 1
 
     def log_img(self, pl_module, batch, batch_idx, split="train", save_dir=None):
@@ -528,15 +529,15 @@ class SingleImageLogger(Callback):
                 pl_module.eval()
 
             with torch.no_grad():
-                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs) # call log_images
 
             for k in images:
-                N = min(images[k].shape[0], self.max_images)
+                N = min(images[k].shape[0], self.max_images) # limit number of images
                 images[k] = images[k][:N]
                 if isinstance(images[k], torch.Tensor):
-                    images[k] = images[k].detach().cpu()
+                    images[k] = images[k].detach().cpu() # move to cpu
                     if self.clamp:
-                        images[k] = torch.clamp(images[k], -1., 1.)
+                        images[k] = torch.clamp(images[k], -1., 1.) # clamp to [-1, 1]
 
             self.log_local(pl_module.logger.save_dir if save_dir is None else save_dir, split, images,
                            pl_module.global_step, pl_module.current_epoch, batch_idx)
@@ -680,7 +681,7 @@ if __name__ == "__main__":
 
         if not opt.finetune_from == "":
             rank_zero_print(f"Attempting to load state from {opt.finetune_from}")
-            old_state = torch.load(opt.finetune_from, map_location="cpu")
+            old_state = torch.load(opt.finetune_from, map_location="cpu", weights_only=False)
 
             if "state_dict" in old_state:
                 rank_zero_print(f"Found nested key 'state_dict' in checkpoint, loading this instead")
@@ -871,7 +872,7 @@ if __name__ == "__main__":
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
-        if not cpu:
+        if not cpu and isinstance(lightning_config.trainer.gpus, str):
             ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
         else:
             ngpu = 1

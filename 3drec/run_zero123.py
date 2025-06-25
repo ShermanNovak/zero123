@@ -212,9 +212,9 @@ def sjc_3d(poser, vox, model: ScoreAdapter,
             y, depth, ws = render_one_view(vox, aabb, H, W, Ks[i], poses[i], return_w=True)
 
             # near-by view
-            eye = poses[i][:3, -1]
-            near_eye = sample_near_eye(eye)
-            near_pose = camera_pose(near_eye, -near_eye, poser.up)
+            eye = poses[i][:3, -1] # extract camera position
+            near_eye = sample_near_eye(eye) # sample perturbed camera position
+            near_pose = camera_pose(near_eye, -near_eye, poser.up) # construct new camera pose
             y_near, depth_near, ws_near = render_one_view(vox, aabb, H, W, Ks[i], near_pose, return_w=True)
             near_loss = ((y_near - y).abs().mean() + (depth_near - depth).abs().mean()) * near_view_weight
             near_loss.backward(retain_graph=True)
@@ -339,12 +339,12 @@ def evaluate(score_model, vox, poser):
 
 
 def render_one_view(vox, aabb, H, W, K, pose, return_w=False):
-    N = H * W
-    ro, rd = rays_from_img(H, W, K, pose)
-    ro, rd, t_min, t_max = scene_box_filter(ro, rd, aabb)
+    N = H * W # total number of pixels
+    ro, rd = rays_from_img(H, W, K, pose) # ray origins and directions
+    ro, rd, t_min, t_max = scene_box_filter(ro, rd, aabb) # filter rays that intersect axis-aligned bounding box, min and max distances to the scene
     assert len(ro) == N, "for now all pixels must be in"
-    ro, rd, t_min, t_max = as_torch_tsrs(vox.device, ro, rd, t_min, t_max)
-    rgbs, depth, weights = render_ray_bundle(vox, ro, rd, t_min, t_max)
+    ro, rd, t_min, t_max = as_torch_tsrs(vox.device, ro, rd, t_min, t_max) # convert to torch tensors
+    rgbs, depth, weights = render_ray_bundle(vox, ro, rd, t_min, t_max) # traces rays and computes RGB values, depth and weights
 
     rgbs = rearrange(rgbs, "(h w) c -> 1 c h w", h=H, w=W)
     depth = rearrange(depth, "(h w) 1 -> h w", h=H, w=W)

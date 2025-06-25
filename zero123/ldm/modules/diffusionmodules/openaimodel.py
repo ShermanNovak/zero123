@@ -755,7 +755,7 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False) # sinusoidal timestep embedding
         emb = self.time_embed(t_emb)
 
         if self.num_classes is not None:
@@ -764,8 +764,10 @@ class UNetModel(nn.Module):
 
         h = x.type(self.dtype)
         for module in self.input_blocks:
+            # print("h shape:", h.shape)
+            # print("context shape:", context.shape if exists(context) else None)
             h = module(h, emb, context)
-            hs.append(h)
+            hs.append(h) # store intermediate activations
         h = self.middle_block(h, emb, context)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)

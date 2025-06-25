@@ -135,7 +135,7 @@ More details on the method and training will come in a future blog post.
 
 def run_demo(
     device_idx=0,
-    ckpt="last.ckpt",
+    ckpt="105000.ckpt",
     config="configs/sd-objaverse-finetune-c_concat-256.yaml",
     ):
 

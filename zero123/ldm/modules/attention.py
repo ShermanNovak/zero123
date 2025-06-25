@@ -152,19 +152,19 @@ class SpatialSelfAttention(nn.Module):
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.):
         super().__init__()
-        inner_dim = dim_head * heads
-        context_dim = default(context_dim, query_dim)
+        inner_dim = dim_head * heads # total dimensionality after concatenation of all attention heads
+        context_dim = default(context_dim, query_dim) # if not provided, use query_dim as context_dim
 
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head ** -0.5 # standard scaling factor for attention
         self.heads = heads
 
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False) # project query input to attention space
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False) # project context input to key space
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False) # project context input to value space
 
-        self.to_out = nn.Sequential(
+        self.to_out = nn.Sequential( # project concatenated attention outupts back to query dimension
             nn.Linear(inner_dim, query_dim),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout) # apply dropout
         )
 
     def forward(self, x, context=None, mask=None):
@@ -175,9 +175,23 @@ class CrossAttention(nn.Module):
         k = self.to_k(context)
         v = self.to_v(context)
 
+        # print("heads", h)
+        # print("x.shape", x.shape)
+        # print("context.shape", context.shape)
+        # print("q.shape", q.shape)
+        # print("k.shape", k.shape)
+        # print("v.shape", v.shape)
+
+        # [batch, sequence_length, (heads * dim_head)] -> [batch * heads, sequence_length, dim_head]
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+
+        # print("q.shape", q.shape)
+        # print("k.shape", k.shape)
+        # print("v.shape", v.shape)
+        # print("sim", sim)
+        # print("sim shape", sim.shape)
 
         if exists(mask):
             mask = rearrange(mask, 'b ... -> b (...)')
@@ -187,6 +201,9 @@ class CrossAttention(nn.Module):
 
         # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
+
+        # print("attn", attn)
+        # print("attn shape", attn.shape)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
@@ -260,6 +277,8 @@ class SpatialTransformer(nn.Module):
         x = self.proj_in(x)
         x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
         for block in self.transformer_blocks:
+            # print("spatial transformer x.shape", x.shape)
+            # print("spatial transformer context.shape", context.shape if exists(context) else None)
             x = block(x, context=context)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         x = self.proj_out(x)

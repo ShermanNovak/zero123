@@ -24,6 +24,7 @@ import os, sys
 import webdataset as wds
 import math
 from torch.utils.data.distributed import DistributedSampler
+from ldm.modules.evaluate.consistency import get_4x4_RT_matrix, get_R_and_t, get_relative_RT
 
 # Some hacky things to make experimentation easier
 def make_transform_multi_folder_data(paths, caption_files=None, **kwargs):
@@ -174,10 +175,13 @@ class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
         self.num_workers = num_workers
         self.total_view = total_view
 
+        dataset_config = None
         if train is not None:
             dataset_config = train
         if validation is not None:
             dataset_config = validation
+        if test is not None:
+            dataset_config = test
 
         if 'image_transforms' in dataset_config:
             image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
@@ -189,19 +193,22 @@ class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
 
 
     def train_dataloader(self):
-        dataset = ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, \
+        print("train dataloader")
+        dataset = ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, test=False, \
                                 image_transforms=self.image_transforms)
         sampler = DistributedSampler(dataset)
         return wds.WebLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
 
     def val_dataloader(self):
-        dataset = ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=True, \
+        print("val dataloader")
+        dataset = ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=True, test=False, \
                                 image_transforms=self.image_transforms)
         sampler = DistributedSampler(dataset)
         return wds.WebLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
     
     def test_dataloader(self):
-        return wds.WebLoader(ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=self.validation),\
+        print("test dataloader")
+        return wds.WebLoader(ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, test=True),\
                           batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
 
 
@@ -214,7 +221,8 @@ class ObjaverseData(Dataset):
         postprocess=None,
         return_paths=False,
         total_view=12,
-        validation=False
+        validation=False,
+        test=False
         ) -> None:
         """Create a dataset from a folder of images.
         If you pass in a root directory it will be searched for images
@@ -231,14 +239,24 @@ class ObjaverseData(Dataset):
         if not isinstance(ext, (tuple, list, ListConfig)):
             ext = [ext]
 
-        with open(os.path.join(root_dir, 'valid_paths.json')) as f:
+        with open('/txining/zero123/objaverse-rendering/view_release/valid_paths.json') as f:
             self.paths = json.load(f)
             
         total_objects = len(self.paths)
-        if validation:
-            self.paths = self.paths[math.floor(total_objects / 100. * 99.):] # used last 1% as validation
+        if total_objects == 10:
+            if validation:
+                self.paths = self.paths[math.floor(total_objects * 0.80):math.floor(total_objects * 0.90)]  # use 1% for validation 
+            elif test:
+                self.paths = self.paths[math.floor(total_objects * 0.90):] # use 1% for test
+            else:
+                self.paths = self.paths[:math.floor(total_objects * 0.80)] # use 98% for training
         else:
-            self.paths = self.paths[:math.floor(total_objects / 100. * 99.)] # used first 99% as training
+            if validation:
+                self.paths = self.paths[math.floor(total_objects * 0.98):math.floor(total_objects * 0.99)]  # use 1% for validation 
+            elif test:
+                self.paths = self.paths[math.floor(total_objects * 0.99):] # use 1% for test
+            else:
+                self.paths = self.paths[:math.floor(total_objects * 0.98)] # use 98% for training
         print('============= length of dataset %d =============' % len(self.paths))
         self.tform = image_transforms
 
@@ -275,6 +293,7 @@ class ObjaverseData(Dataset):
         '''
         replace background pixel with random color in rendering
         '''
+        # print("LOADING IMAGE FROM", path)
         try:
             img = plt.imread(path)
         except:
@@ -288,6 +307,7 @@ class ObjaverseData(Dataset):
 
         data = {}
         total_view = self.total_view
+        # randomly selects 2 different views of the same object
         index_target, index_cond = random.sample(range(total_view), 2) # without replacement
         filename = os.path.join(self.root_dir, self.paths[index])
 
@@ -298,6 +318,7 @@ class ObjaverseData(Dataset):
         
         color = [1., 1., 1., 1.]
 
+        # loads the corresponding images and camera pose matrices
         try:
             target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_target), color))
             cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_cond), color))
@@ -305,7 +326,7 @@ class ObjaverseData(Dataset):
             cond_RT = np.load(os.path.join(filename, '%03d.npy' % index_cond))
         except:
             # very hacky solution, sorry about this
-            filename = os.path.join(self.root_dir, '692db5f2d3a04bb286cb977a7dba903e_1') # this one we know is valid
+            filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce') # this one we know is valid
             target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_target), color))
             cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_cond), color))
             target_RT = np.load(os.path.join(filename, '%03d.npy' % index_target))
@@ -313,9 +334,190 @@ class ObjaverseData(Dataset):
             target_im = torch.zeros_like(target_im)
             cond_im = torch.zeros_like(cond_im)
 
-        data["image_target"] = target_im
-        data["image_cond"] = cond_im
-        data["T"] = self.get_T(target_RT, cond_RT)
+        data["image_target"] = target_im # target view image tensor
+        data["image_cond"] = cond_im # conditioning view image tensor
+        data["T"] = self.get_T(target_RT, cond_RT) # relative camera pose between target and conditioning view
+
+        target_R, target_t = get_R_and_t(target_RT)
+        target_RT4 = get_4x4_RT_matrix(target_R, target_t)
+        cond_R, cond_t = get_R_and_t(cond_RT)
+        cond_RT4 = get_4x4_RT_matrix(cond_R, cond_t)
+        relative_RT4 = get_relative_RT(target_RT4, cond_RT4)
+        data["relative_RT4"] = relative_RT4
+
+        if self.postprocess is not None:
+            data = self.postprocess(data)
+
+        return data
+
+    def process_im(self, im):
+        im = im.convert("RGB")
+        return self.tform(im)
+
+class MultiViewObjaverseDataModuleFromConfig(pl.LightningDataModule):
+    def __init__(self, root_dir, batch_size, total_view, train=None, validation=None,
+                 test=None, num_workers=4, **kwargs):
+        super().__init__(self)
+        self.root_dir = root_dir
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.total_view = total_view
+
+        if train is not None:
+            dataset_config = train
+        if validation is not None:
+            dataset_config = validation
+        if test is not None:
+            dataset_config = test
+
+        if 'image_transforms' in dataset_config:
+            image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
+        else:
+            image_transforms = []
+        image_transforms.extend([transforms.ToTensor(),
+                                transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
+        self.image_transforms = torchvision.transforms.Compose(image_transforms)
+
+
+    def train_dataloader(self):
+        print("train dataloader")
+        dataset = MultiViewObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, test=False, \
+                                image_transforms=self.image_transforms)
+        sampler = DistributedSampler(dataset)
+        return wds.WebLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
+
+    def val_dataloader(self):
+        print("val dataloader")
+        dataset = MultiViewObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=True, test=False, \
+                                image_transforms=self.image_transforms)
+        sampler = DistributedSampler(dataset)
+        return wds.WebLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+    
+    def test_dataloader(self):
+        print("test dataloader")
+        return wds.WebLoader(MultiViewObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, test=True),\
+                          batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+
+
+class MultiViewObjaverseData(Dataset):
+    def __init__(self,
+        root_dir='.objaverse/hf-objaverse-v1/views',
+        image_transforms=[],
+        ext="png",
+        default_trans=torch.zeros(3),
+        postprocess=None,
+        return_paths=False,
+        total_view=12,
+        validation=False
+        ) -> None:
+        """Create a dataset from a folder of images.
+        If you pass in a root directory it will be searched for images
+        ending in ext (ext can be a list)
+        """
+        self.root_dir = Path(root_dir)
+        self.default_trans = default_trans
+        self.return_paths = return_paths
+        if isinstance(postprocess, DictConfig):
+            postprocess = instantiate_from_config(postprocess)
+        self.postprocess = postprocess
+        self.total_view = total_view
+
+        if not isinstance(ext, (tuple, list, ListConfig)):
+            ext = [ext]
+
+        with open(os.path.join(root_dir, 'view_release/valid_paths.json')) as f:
+            self.paths = json.load(f)
+            
+        total_objects = len(self.paths)
+        if validation:
+            self.paths = self.paths[math.floor(total_objects * 0.98):math.floor(total_objects * 0.99)]  # use 1% for validation 
+        elif test:
+            self.paths = self.paths[math.floor(total_objects * 0.99):] # use 1% for test
+        else:
+            self.paths = self.paths[:math.floor(total_objects * 0.98)] # use 98% for training
+        print('============= length of dataset %d =============' % len(self.paths))
+        self.tform = image_transforms
+
+    def __len__(self):
+        return len(self.paths)
+        
+    def cartesian_to_spherical(self, xyz):
+        ptsnew = np.hstack((xyz, np.zeros(xyz.shape)))
+        xy = xyz[:,0]**2 + xyz[:,1]**2
+        z = np.sqrt(xy + xyz[:,2]**2)
+        theta = np.arctan2(np.sqrt(xy), xyz[:,2]) # for elevation angle defined from Z-axis down
+        #ptsnew[:,4] = np.arctan2(xyz[:,2], np.sqrt(xy)) # for elevation angle defined from XY-plane up
+        azimuth = np.arctan2(xyz[:,1], xyz[:,0])
+        return np.array([theta, azimuth, z])
+    
+    def get_T(self, target_RT, cond_RT):
+        R, T = target_RT[:3, :3], target_RT[:, -1]
+        T_target = -R.T @ T
+
+        R, T = cond_RT[:3, :3], cond_RT[:, -1]
+        T_cond = -R.T @ T
+
+        theta_cond, azimuth_cond, z_cond = self.cartesian_to_spherical(T_cond[None, :])
+        theta_target, azimuth_target, z_target = self.cartesian_to_spherical(T_target[None, :])
+        
+        d_theta = theta_target - theta_cond
+        d_azimuth = (azimuth_target - azimuth_cond) % (2 * math.pi)
+        d_z = z_target - z_cond
+        
+        d_T = torch.tensor([d_theta.item(), math.sin(d_azimuth.item()), math.cos(d_azimuth.item()), d_z.item()])
+        return d_T
+
+    def load_im(self, path, color):
+        '''
+        replace background pixel with random color in rendering
+        '''
+        print("LOADING IMAGE FROM", path)
+        try:
+            img = plt.imread(path)
+        except:
+            print(path)
+            sys.exit()
+        img[img[:, :, -1] == 0.] = color
+        img = Image.fromarray(np.uint8(img[:, :, :3] * 255.))
+        return img
+
+    def __getitem__(self, index):
+        data = {}
+
+        # randomly selects 1 target view of the object
+        index_target = random.randint(0, self.total_view - 1)
+        
+        # randomly selects a number of conditioning views
+        num_cond_views = random.randint(1, self.total_view - 1)  
+        cond_indices = [i for i in range(self.total_view) if i != index_target]
+        cond_views = random.sample(cond_indices, num_cond_views)
+
+        # ensure that the target view is always the first one
+        views = [index_target] + cond_views
+
+        filename = os.path.join(self.root_dir, self.paths[index])
+        if self.return_paths:
+            data["path"] = str(filename)
+
+        color = [1., 1., 1., 1.]
+
+        cond_imgs = []
+        cond_RTs = []
+        target_RT = None
+        for idx in views:
+            img = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % idx), color))
+            RT = np.load(os.path.join(filename, '%03d.npy' % idx))
+            if idx == index_target:
+                data["image_target"] = img
+                target_RT = RT
+            else:
+                cond_imgs.append(img)
+                cond_RTs.append(RT)
+
+        # Stack conditioning images and RTs
+        assert target_RT is not None
+        data["image_cond"] = torch.stack(cond_imgs, dim=0)  # (num_cond_views, C, H, W)
+        data["T"] = torch.stack([self.get_T(target_RT, cond_RT) for cond_RT in cond_RTs], dim=0)
 
         if self.postprocess is not None:
             data = self.postprocess(data)

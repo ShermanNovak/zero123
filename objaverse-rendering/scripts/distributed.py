@@ -58,7 +58,7 @@ def worker(
             # f" GOMP_CPU_AFFINITY='0-47' OMP_NUM_THREADS=48 OMP_SCHEDULE=STATIC OMP_PROC_BIND=CLOSE "
             f" CUDA_VISIBLE_DEVICES={gpu} "
             f" blender-3.2.2-linux-x64/blender -b -P scripts/blender_script.py --"
-            f" --object_path {item}"
+            f" --object_path {item} --camera_type fixed"
         )
         print(command)
         subprocess.run(command, shell=True)
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     model_keys = list(model_paths.keys())
 
     for item in model_keys:
-        queue.put(os.path.join('.objaverse/hf-objaverse-v1', model_paths[item]))
+        queue.put(os.path.join('.objaverse/hf-objaverse-v1/views_whole_sphere', model_paths[item]))
 
     # update the wandb count
     if args.log_to_wandb:
