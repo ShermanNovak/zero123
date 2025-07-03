@@ -2,7 +2,6 @@
 # pass in multiple input images through CLIP and concat them horizontally like the original code with T
 # put in conditioning tensor of (1, N, 768) where N is the number of images
 # need to use the MultiViewObjaverseDataModuleFromConfig
-# need to change input channels in config to 4 instead of 8
 
 """
 wild mixture of
@@ -33,7 +32,7 @@ from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, Autoenc
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.modules.attention import CrossAttention
-
+from ldm.modules.evaluate.evaluate import compute_evaluation_metrics
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -389,8 +388,7 @@ class DDPM(pl.LightningModule):
         elif len(x.shape) == 4:
             x = rearrange(x, 'b h w c -> b c h w')
         elif len(x.shape) == 5:
-            x = x.squeeze(0) # remove first dimension
-            x = rearrange(x, 'b h w c -> b c h w')
+            x = rearrange(x, ' i b h w c -> i b c h w')
         x = x.to(memory_format=torch.contiguous_format).float()
         return x
 
@@ -764,28 +762,28 @@ class LatentDiffusion(DDPM):
         return fold, unfold, normalization, weighting
 
     
-    @torch.no_grad()
-    def validation_step(self, batch, batch_idx):
-        # 1. Forward pass and loss
-        _, loss_dict_no_ema = self.shared_step(batch)
-        with self.ema_scope():
-            _, loss_dict_ema = self.shared_step(batch)
-            loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
+    # @torch.no_grad()
+    # def validation_step(self, batch, batch_idx):
+    #     # 1. Forward pass and loss
+    #     _, loss_dict_no_ema = self.shared_step(batch)
+    #     with self.ema_scope():
+    #         _, loss_dict_ema = self.shared_step(batch)
+    #         loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
 
-        # 2. Decode predicted and ground truth images
-        # Get latents and conditioning
-        z, c, x_gt, xrec, xc = self.get_input(
-            batch, self.first_stage_key, return_first_stage_outputs=True, force_c_encode=True, return_original_cond=True
-        )
-        # xrec: reconstructed images (predictions), x_gt: ground truth images
+    #     # 2. Decode predicted and ground truth images
+    #     # Get latents and conditioning
+    #     z, c, x_gt, xrec, xc = self.get_input(
+    #         batch, self.first_stage_key, return_first_stage_outputs=True, force_c_encode=True, return_original_cond=True
+    #     )
+    #     # xrec: reconstructed images (predictions), x_gt: ground truth images
 
-        metrics = compute_evaluation_metrics(xrec, x_gt, batch["relative_RT4"])
-        print(metrics)
-        for k, v in metrics.items():
-            loss_dict_no_ema[k] = v
+    #     metrics = compute_evaluation_metrics(xrec, x_gt, batch["relative_RT4"])
+    #     print(metrics)
+    #     for k, v in metrics.items():
+    #         loss_dict_no_ema[k] = v
 
-        self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
-        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+    #     self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+    #     self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
     
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
@@ -813,29 +811,33 @@ class LatentDiffusion(DDPM):
             xc = xc[:bs]
         cond = {}
 
-        print("xc.shape", xc.shape)
-
         # To support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
-        random = torch.rand(x.size(0), device=x.device) # generate tensor with random values
+        random = torch.rand(x.size(0), device=x.device) # each sample has a random value to decide to use masking or null prompt
         prompt_mask = rearrange(random < 2 * uncond, "n -> n 1 1") # check which random values are less than probability
         input_mask = 1 - rearrange((random >= uncond).float() * (random < 3 * uncond).float(), "n -> n 1 1 1") # set to zero where samples fall between uncond and 3*uncond
         null_prompt = self.get_learned_conditioning([""]) # represents the absence of a prompt
 
-        # z.shape: [8, 4, 64, 64]; c.shape: [8, 1, 768]
-        # print('=========== xc shape ===========', xc.shape)
+        B, I, C, H, W = xc.shape
+        xc = xc.view(-1, C, H, W) # collapse the batch size and num_cond_img dimensions
+        print("xc", xc.shape)
+
         with torch.enable_grad():
             clip_emb = self.get_learned_conditioning(xc).detach()
+            clip_emb = clip_emb.view(B, -1, 768)
+        
             null_prompt = self.get_learned_conditioning([""]).detach()
-            print("clip_emb.shape", clip_emb.shape)
-            T = T.permute(1, 0, 2) # 1, 6, 4 to 6, 1, 4
-            print("T", T.shape)
-            print("torch.where(prompt_mask, null_prompt, clip_emb)", torch.where(prompt_mask, null_prompt, clip_emb).shape)
-            print("torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T], dim=-1))", torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T], dim=-1).shape)
-            print("self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T], dim=-1))", self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T], dim=-1)).shape)
-            proj = self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T], dim=-1))
-            proj = proj.permute(1, 0, 2)
-            cond["c_crossattn"] = [proj] # concat masked clip embedding and T then project
-        cond["c_concat"] = [input_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()] # encode xc into latent space, mode extracts most likely value from the distribution, input_mask zeroes out conditioning for certain samples
+            masked_clip_emb = torch.where(prompt_mask, null_prompt, clip_emb)
+
+            projection = self.cc_projection(torch.cat([masked_clip_emb, T], dim=-1))
+            cond["c_crossattn"] = [projection] # concat masked clip embedding and T then project
+            
+        encoded_xc = self.encode_first_stage((xc.to(self.device))).mode().detach()
+        print("encoded_xc", encoded_xc.shape)
+        encoded_xc = encoded_xc.view(B, -1, *encoded_xc.shape[1:]) # reshape to (B, I, C, H, W)
+        print("encoded_xc", encoded_xc.shape)
+        # Ensure input_mask is broadcastable to encoded_xc
+        input_mask_broadcast = input_mask.view(B, 1, 1, 1, 1)
+        cond["c_concat"] = [input_mask_broadcast * encoded_xc] # encode xc into latent space, mode extracts most likely value from the distribution, input_mask zeroes out conditioning for certain samples
         
         print("cond[c_concat]", cond["c_concat"][0].shape)
 
@@ -1138,6 +1140,8 @@ class LatentDiffusion(DDPM):
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
+        self.logvar = self.logvar.to(self.device)
+        t = t.to(self.device)
         logvar_t = self.logvar[t].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
@@ -1506,6 +1510,7 @@ class LatentDiffusion(DDPM):
 
         if sample:
             # get denoise row
+            print("self.sample_log input c", c)
             with ema_scope("Sampling"):
                 samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
                                                          ddim_steps=ddim_steps,eta=ddim_eta)
@@ -1666,7 +1671,11 @@ class DiffusionWrapper(pl.LightningModule):
             # changed to dim=0 for multi input
             print("c_concat", c_concat[0].shape)
             print("c_crossattn", c_crossattn[0].shape)
-            xc = torch.cat([x] + c_concat, dim=0)
+            print("x", x.shape)
+            if len(c_concat[0].shape) == 5:
+                c_concat = [c_concat[0].mean(dim=1)]
+                print("c_concat_mean", c_concat[0].shape)
+            xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, 1)
             print("xc", xc.shape)
             print("cc", cc.shape)

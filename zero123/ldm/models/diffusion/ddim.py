@@ -198,9 +198,22 @@ class DDIMSampler(object):
                 c_in = dict()
                 for k in c:
                     if isinstance(c[k], list):
-                        c_in[k] = [torch.cat([
-                            unconditional_conditioning[k][i],
-                            c[k][i]]) for i in range(len(c[k]))]
+                        print("unconditional_conditioning[k]", unconditional_conditioning[k][0].shape)
+                        print("c[k]", k, c[k][0].shape)
+
+                        if k == 'c_crossattn':
+                            c_in[k] = [torch.cat([
+                                unconditional_conditioning[k][i].repeat(1, c[k][i].shape[1], 1),
+                                c[k][i]]) for i in range(len(c[k]))]
+
+                        if k == 'c_concat':
+                            c_in[k] = [torch.cat([
+                                unconditional_conditioning[k][i],
+                                c[k][i].mean(dim=1)]) for i in range(len(c[k]))]
+                        
+                        # c_in[k] = [torch.cat([
+                        #     unconditional_conditioning[k][i],
+                        #     c[k][i]]) for i in range(len(c[k]))]
                     else:
                         c_in[k] = torch.cat([
                                 unconditional_conditioning[k],

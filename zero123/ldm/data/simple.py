@@ -183,10 +183,11 @@ class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
         if test is not None:
             dataset_config = test
 
-        if 'image_transforms' in dataset_config:
-            image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
-        else:
-            image_transforms = []
+        image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
+        # if 'image_transforms' in dataset_config:
+        #     image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
+        # else:
+        #     image_transforms = []
         image_transforms.extend([transforms.ToTensor(),
                                 transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
         self.image_transforms = torchvision.transforms.Compose(image_transforms)
@@ -245,11 +246,11 @@ class ObjaverseData(Dataset):
         total_objects = len(self.paths)
         if total_objects == 10:
             if validation:
-                self.paths = self.paths[math.floor(total_objects * 0.80):math.floor(total_objects * 0.90)]  # use 1% for validation 
+                self.paths = self.paths[math.floor(total_objects * 0.60):math.floor(total_objects * 0.80)]  # use 1% for validation 
             elif test:
-                self.paths = self.paths[math.floor(total_objects * 0.90):] # use 1% for test
+                self.paths = self.paths[math.floor(total_objects * 0.80):] # use 1% for test
             else:
-                self.paths = self.paths[:math.floor(total_objects * 0.80)] # use 98% for training
+                self.paths = self.paths[:math.floor(total_objects * 0.60)] # use 98% for training
         else:
             if validation:
                 self.paths = self.paths[math.floor(total_objects * 0.98):math.floor(total_objects * 0.99)]  # use 1% for validation 
@@ -354,6 +355,26 @@ class ObjaverseData(Dataset):
         im = im.convert("RGB")
         return self.tform(im)
 
+def multiview_collate_fn(batch):
+    """
+    Custom collate function for MultiViewObjaverseData to handle variable-length conditioning views.
+    Each batch item is a dict with keys like:
+      - "image_target": Tensor (C, H, W)
+      - "image_cond": Tensor (num_cond_views, C, H, W)
+      - "T": Tensor (num_cond_views, 4)
+      - "relative_RT4": Tensor (num_cond_views, 4, 4)
+    This collate function will:
+      - Stack "image_target" into a tensor (B, C, H, W)
+      - Gather "image_cond", "T", "relative_RT4" into lists of tensors (length B)
+    """
+    batch_out = {}
+    # Stack image_target (always same shape)
+    batch_out["image_target"] = torch.stack([item["image_target"] for item in batch], dim=0)
+    # Gather variable-length fields as lists
+    for key in ["image_cond", "T", "relative_RT4"]:
+        batch_out[key] = [item[key] for item in batch]
+    return batch_out
+
 class MultiViewObjaverseDataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, root_dir, batch_size, total_view, train=None, validation=None,
                  test=None, num_workers=4, **kwargs):
@@ -408,7 +429,8 @@ class MultiViewObjaverseData(Dataset):
         postprocess=None,
         return_paths=False,
         total_view=12,
-        validation=False
+        validation=False,
+        test=False
         ) -> None:
         """Create a dataset from a folder of images.
         If you pass in a root directory it will be searched for images
@@ -425,16 +447,24 @@ class MultiViewObjaverseData(Dataset):
         if not isinstance(ext, (tuple, list, ListConfig)):
             ext = [ext]
 
-        with open(os.path.join(root_dir, 'view_release/valid_paths.json')) as f:
+        with open('/txining/zero123/objaverse-rendering/view_release/valid_paths.json') as f:
             self.paths = json.load(f)
             
         total_objects = len(self.paths)
-        if validation:
-            self.paths = self.paths[math.floor(total_objects * 0.98):math.floor(total_objects * 0.99)]  # use 1% for validation 
-        elif test:
-            self.paths = self.paths[math.floor(total_objects * 0.99):] # use 1% for test
+        if total_objects == 10:
+            if validation:
+                self.paths = self.paths[math.floor(total_objects * 0.60):math.floor(total_objects * 0.80)]  # use 1% for validation 
+            elif test:
+                self.paths = self.paths[math.floor(total_objects * 0.80):] # use 1% for test
+            else:
+                self.paths = self.paths[:math.floor(total_objects * 0.60)] # use 98% for training
         else:
-            self.paths = self.paths[:math.floor(total_objects * 0.98)] # use 98% for training
+            if validation:
+                self.paths = self.paths[math.floor(total_objects * 0.98):math.floor(total_objects * 0.99)]  # use 1% for validation 
+            elif test:
+                self.paths = self.paths[math.floor(total_objects * 0.99):] # use 1% for test
+            else:
+                self.paths = self.paths[:math.floor(total_objects * 0.98)] # use 98% for training
         print('============= length of dataset %d =============' % len(self.paths))
         self.tform = image_transforms
 
@@ -471,7 +501,7 @@ class MultiViewObjaverseData(Dataset):
         '''
         replace background pixel with random color in rendering
         '''
-        print("LOADING IMAGE FROM", path)
+        # print("LOADING IMAGE FROM", path)
         try:
             img = plt.imread(path)
         except:
@@ -481,8 +511,26 @@ class MultiViewObjaverseData(Dataset):
         img = Image.fromarray(np.uint8(img[:, :, :3] * 255.))
         return img
 
-    def __getitem__(self, index):
-        data = {}
+    def pad(self, images, MAX_LEN=12):
+        """Pad images to a fixed length of MAX_LEN because Dataset needs everything to be the same shape"""
+        if len(images) < MAX_LEN:
+            pad_size = MAX_LEN - len(images)
+            pad = torch.zeros((pad_size, *images[0].shape), dtype=images[0].dtype)
+            images = torch.cat([images, pad], dim=0)
+        return images
+
+    def get_relative_RT4(self, target_RT, cond_RT):
+        target_R, target_t = get_R_and_t(target_RT)
+        target_RT4 = get_4x4_RT_matrix(target_R, target_t)
+        cond_R, cond_t = get_R_and_t(cond_RT)
+        cond_RT4 = get_4x4_RT_matrix(cond_R, cond_t)
+        return get_relative_RT(target_RT4, cond_RT4)
+
+    def get_target_cond(self, filename, color=[1., 1., 1., 1.]):
+        cond_imgs = []
+        cond_RTs = []
+        target_img = None
+        target_RT = None
 
         # randomly selects 1 target view of the object
         index_target = random.randint(0, self.total_view - 1)
@@ -495,29 +543,44 @@ class MultiViewObjaverseData(Dataset):
         # ensure that the target view is always the first one
         views = [index_target] + cond_views
 
+        for idx in views:
+            try:
+                img = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % idx), color))
+                RT = np.load(os.path.join(filename, '%03d.npy' % idx))
+                if idx == index_target:
+                    target_img = img
+                    target_RT = RT
+                else:
+                    cond_imgs.append(img)
+                    cond_RTs.append(RT)
+            except FileNotFoundError:
+                print(f"Missing file: {filename}")
+            except EOFError:
+                print(f"Corrupted file: {filename}")
+        return target_img, target_RT, cond_imgs, cond_RTs
+        
+    def __getitem__(self, index):
+        data = {}
+
         filename = os.path.join(self.root_dir, self.paths[index])
         if self.return_paths:
             data["path"] = str(filename)
 
-        color = [1., 1., 1., 1.]
+        # handle missing files (need at least 1 target and 1 input image)
+        count = sum(1 for f in os.listdir(filename) if os.path.isfile(os.path.join(filename, f)))
+        if count < 4:
+            filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce')
 
-        cond_imgs = []
-        cond_RTs = []
-        target_RT = None
-        for idx in views:
-            img = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % idx), color))
-            RT = np.load(os.path.join(filename, '%03d.npy' % idx))
-            if idx == index_target:
-                data["image_target"] = img
-                target_RT = RT
-            else:
-                cond_imgs.append(img)
-                cond_RTs.append(RT)
+        target_img, target_RT, cond_imgs, cond_RTs = self.get_target_cond(filename)
+
+        while target_img is None or len(cond_imgs) == 0:
+            target_img, target_RT, cond_imgs, cond_RTs = self.get_target_cond(filename)
 
         # Stack conditioning images and RTs
-        assert target_RT is not None
-        data["image_cond"] = torch.stack(cond_imgs, dim=0)  # (num_cond_views, C, H, W)
-        data["T"] = torch.stack([self.get_T(target_RT, cond_RT) for cond_RT in cond_RTs], dim=0)
+        data["image_target"] = target_img
+        data["image_cond"] = self.pad(torch.stack(cond_imgs, dim=0))  # (num_cond_views, C, H, W)
+        data["T"] = self.pad(torch.stack([self.get_T(target_RT, cond_RT) for cond_RT in cond_RTs], dim=0))
+        data["relative_RT4"] = self.pad(torch.stack([torch.tensor(self.get_relative_RT4(target_RT, cond_RT)) for cond_RT in cond_RTs], dim=0))
 
         if self.postprocess is not None:
             data = self.postprocess(data)

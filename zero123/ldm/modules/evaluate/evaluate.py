@@ -1,8 +1,8 @@
 from ldm.modules.evaluate.evaluate_perceptualsim import PNet, perceptual_sim, ssim_metric, psnr
-from ldm.modules.evaluate.consistency import compute_geometric_consistency_approx_F, compute_geometric_consistency_with_K
+from ldm.modules.evaluate.consistency import compute_geometric_consistency_approx_F, compute_geometric_consistency_with_K, compute_geometric_consistency_with_latent, compute_geometric_consistency_with_translation
 import torch
 
-def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT):
+def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT, calc_latent_sim=False, calc_trans_sim=False):
     """
     Compute evaluation metrics for a batch of images.
     Args:
@@ -50,7 +50,7 @@ def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT):
     avg_ssim, std_ssim = avg_std(ssim_scores)
     avg_psnr, std_psnr = avg_std(psnr_scores)
 
-    return {
+    metrics = {
         "LPIPS/avg": avg_percsim,
         "LPIPS/std": std_percsim,
         "PSNR/avg": avg_psnr,
@@ -60,3 +60,12 @@ def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT):
         "gc_K/avg": gc_K,
         "gc_F/avg": gc_F,
     }
+
+    if calc_latent_sim:
+        gc_L = compute_geometric_consistency_with_latent(batch_img_rec, batch_img_gt, batch_relative_RT)
+        metrics["gc_L/avg"] = gc_L
+    if calc_trans_sim:
+        gc_T = compute_geometric_consistency_with_translation(batch_img_rec, batch_img_gt, batch_relative_RT)
+        metrics["gc_T/avg"] = gc_T
+
+    return metrics

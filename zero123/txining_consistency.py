@@ -255,9 +255,15 @@ def compute_geometric_consistency_with_translation(
     # Set to evaluation mode
     feature_extractor.eval().to(device)
 
-    weights = ResNet50_Weights.DEFAULT
-    preprocess = weights.transforms()
-    print(preprocess)
+    # weights = ResNet50_Weights.DEFAULT
+    # preprocess = weights.transforms()
+
+    preprocess = transforms.Compose([
+        transforms.Resize(232, interpolation=transforms.InterpolationMode.BILINEAR),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
 
     target_feature_map = np.zeros((64, N, N), dtype=np.float32)
     cond_feature_map = np.zeros((64, N, N), dtype=np.float32)
@@ -270,16 +276,18 @@ def compute_geometric_consistency_with_translation(
             for ty in range(scale):
                 N, M, _ = target_im_np.shape
 
-                # translate image
+                # translate image using numpy arrays
                 target_im_translated = np.zeros_like(target_im_np)
-                target_im_translated[max(tx,0):M+min(tx,0), max(ty,0):N+min(ty,0)] = target_im_np[-min(tx,0):M-max(tx,0), -min(ty,0):N-max(ty,0)] 
+                target_im_translated[max(tx,0):M+min(tx,0), max(ty,0):N+min(ty,0)] = target_im_np[-min(tx,0):M-max(tx,0), -min(ty,0):N-max(ty,0)]
 
                 cond_im_translated = np.zeros_like(cond_im_np)
-                cond_im_translated[max(tx,0):M+min(tx,0), max(ty,0):N+min(ty,0)] = cond_im_np[-min(tx,0):M-max(tx,0), -min(ty,0):N-max(ty,0)] 
+                cond_im_translated[max(tx,0):M+min(tx,0), max(ty,0):N+min(ty,0)] = cond_im_np[-min(tx,0):M-max(tx,0), -min(ty,0):N-max(ty,0)]
 
-                # convert image to tensor
-                target_im_processed = preprocess(target_im).unsqueeze(0).to(device)
-                cond_im_processed = preprocess(cond_im).unsqueeze(0).to(device)
+                # convert numpy arrays to PIL Images before preprocessing
+                target_im_pil = Image.fromarray(target_im_translated)
+                cond_im_pil = Image.fromarray(cond_im_translated)
+                target_im_processed = preprocess(target_im_pil).unsqueeze(0).to(device)
+                cond_im_processed = preprocess(cond_im_pil).unsqueeze(0).to(device)
 
                 # get features
                 target_f = feature_extractor(target_im_processed).cpu().numpy()
@@ -353,7 +361,8 @@ def compute_geometric_consistency_with_translation(
             plt.savefig(f'./feature_grid_translation/{object_id1}_{index_target}_dot_zero_grid_{i}.png')
             plt.close()
         
-    return    
+    print(np.mean(max_sims))
+    return 
 
 def compute_geometric_consistency_with_resnet(
         target_im, cond_im, target_RT, cond_RT, target_K, cond_K, 
@@ -382,7 +391,7 @@ def compute_geometric_consistency_with_resnet(
     with torch.no_grad():
         target_f = feature_extractor(target_im_processed).to(device)
         cond_f = feature_extractor(cond_im_processed).to(device)
-        print(target_f.shape) # [1, 2048, 7, 7]
+        # print(target_f.shape) # [1, 2048, 7, 7]
 
         target_R, target_t = get_R_and_t(target_RT)
         target_RT4 = get_4x4_RT_matrix(target_R, target_t)
@@ -435,9 +444,8 @@ def compute_geometric_consistency_with_resnet(
         cond_feat = cond_f[0, :, fy2, fx2].T      # → (M, C)
 
         sims = cosine_similarity(target_feat, cond_feat, dim=1)
-        print(np.mean(sims))
 
-        return
+        return np.mean(sims)
 
         # normalise F
         # F = F * (1.0 / F[2, 2])
