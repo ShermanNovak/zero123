@@ -2,6 +2,7 @@
 # pass in multiple input images through CLIP and concat them horizontally like the original code with T
 # put in conditioning tensor of (1, N, 768) where N is the number of images
 # need to use the MultiViewObjaverseDataModuleFromConfig
+# in ddim.py uncomment lines 204 to 212
 
 """
 wild mixture of

@@ -35,7 +35,7 @@ from torchvision import transforms
 _SHOW_DESC = True
 _SHOW_INTERMEDIATE = False
 # _SHOW_INTERMEDIATE = True
-_GPU_INDEX = 1
+_GPU_INDEX = 0
 # _GPU_INDEX = 2
 
 # _TITLE = 'Zero-Shot Control of Camera Viewpoints within a Single Image'
@@ -82,12 +82,13 @@ def sample_model(input_im, model, sampler, precision, h, w, ddim_steps, n_sample
             T = torch.tensor([math.radians(x), math.sin(
                 math.radians(y)), math.cos(math.radians(y)), z])
             print("T.shape", T.shape)
-            T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device)
-            print("T.shape after T[None, None, :]", T.shape)
-            c = torch.cat([c, T], dim=-1)
+            T = T.to(c.device)
+            T = model.cc_projection(T)
+            print("model.cc_projection.weight", model.cc_projection.weight)
+            T = T.tile(n_samples, 1, 1)
+            print("T.shape after projection", T.shape)
+            c = torch.cat([c, T], dim=1)
             print("c.shape after cat", c.shape)
-            c = model.cc_projection(c)
-            print("c.shape after projection", c.shape)
             cond = {}
             cond['c_crossattn'] = [c]
             cond['c_concat'] = [model.encode_first_stage((input_im.to(c.device))).mode().detach()
@@ -472,8 +473,8 @@ def calc_cam_cone_pts_3d(polar_deg, azimuth_deg, radius_m, fov_deg):
 
 def run_demo(
         device_idx=_GPU_INDEX,
-        ckpt='105000.ckpt',
-        config='configs/sd-objaverse-finetune-c_concat-256.yaml'):
+        ckpt='/txining/zero123/zero123/logs/2025-07-04T08-17-57_sd-objaverse-finetune-c_concat-256/checkpoints/last.ckpt',
+        config='configs/crossattn-vertical.yaml'):
 
     print('sys.argv:', sys.argv)
     if len(sys.argv) > 1:

@@ -1,6 +1,7 @@
 from ldm.modules.evaluate.evaluate_perceptualsim import PNet, perceptual_sim, ssim_metric, psnr
 from ldm.modules.evaluate.consistency import compute_geometric_consistency_approx_F, compute_geometric_consistency_with_K, compute_geometric_consistency_with_latent, compute_geometric_consistency_with_translation
 import torch
+import numpy as np
 
 def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT, calc_latent_sim=False, calc_trans_sim=False):
     """
@@ -44,7 +45,7 @@ def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT, c
     gc_F = compute_geometric_consistency_approx_F(batch_img_rec, batch_img_gt)
 
     def avg_std(x):
-        return float(torch.tensor(x).mean()), float(torch.tensor(x).std())
+        return float(np.nanmean(x)), float(np.nanstd(x))
 
     avg_percsim, std_percsim = avg_std(lpips_scores)
     avg_ssim, std_ssim = avg_std(ssim_scores)
