@@ -166,6 +166,53 @@ class NfpDataset(Dataset):
         im = Image.open(filename).convert("RGB")
         return self.tform(im)
 
+class HeuristicObjaverseDataModuleFromConfig(pl.LightningDataModule):
+    def __init__(self, root_dir, batch_size, total_view, train=None, validation=None,
+                 test=None, num_workers=4, **kwargs):
+        super().__init__(self)
+        self.root_dir = root_dir
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.total_view = total_view
+
+        dataset_config = None
+        if train is not None:
+            dataset_config = train
+        if validation is not None:
+            dataset_config = validation
+        if test is not None:
+            dataset_config = test
+
+        image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
+        # if 'image_transforms' in dataset_config:
+        #     image_transforms = [torchvision.transforms.Resize(dataset_config.image_transforms.size)]
+        # else:
+        #     image_transforms = []
+        image_transforms.extend([transforms.ToTensor(),
+                                transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
+        self.image_transforms = torchvision.transforms.Compose(image_transforms)
+
+
+    def train_dataloader(self):
+        print("train dataloader")
+        dataset = ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, test=False, \
+                                image_transforms=self.image_transforms, heuristic=True, view_paths_file='/txining/zero123/objaverse-rendering/view_release/valid_paths_heuristic.json')
+        sampler = DistributedSampler(dataset)
+        return wds.WebLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
+
+    def val_dataloader(self):
+        print("val dataloader")
+        dataset = ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=True, test=False, \
+                                image_transforms=self.image_transforms, heuristic=True, view_paths_file='/txining/zero123/objaverse-rendering/view_release/valid_paths_heuristic.json')
+        sampler = DistributedSampler(dataset)
+        return wds.WebLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+    
+    def test_dataloader(self):
+        print("test dataloader")
+        return wds.WebLoader(ObjaverseData(root_dir=self.root_dir, total_view=self.total_view, validation=False, test=True, heuristic=True, view_paths_file='/txining/zero123/objaverse-rendering/view_release/valid_paths_heuristic.json'),\
+                          batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+
+
 class ObjaverseDataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, root_dir, batch_size, total_view, train=None, validation=None,
                  test=None, num_workers=4, **kwargs):
@@ -223,7 +270,9 @@ class ObjaverseData(Dataset):
         return_paths=False,
         total_view=12,
         validation=False,
-        test=False
+        test=False,
+        heuristic=False,
+        view_paths_file='/txining/zero123/objaverse-rendering/view_release/valid_paths.json'
         ) -> None:
         """Create a dataset from a folder of images.
         If you pass in a root directory it will be searched for images
@@ -236,11 +285,12 @@ class ObjaverseData(Dataset):
             postprocess = instantiate_from_config(postprocess)
         self.postprocess = postprocess
         self.total_view = total_view
+        self.heuristic = heuristic
 
         if not isinstance(ext, (tuple, list, ListConfig)):
             ext = [ext]
 
-        with open('/txining/zero123/objaverse-rendering/view_release/valid_paths.json') as f:
+        with open(view_paths_file) as f:
             self.paths = json.load(f)
             
         total_objects = len(self.paths)
@@ -294,12 +344,8 @@ class ObjaverseData(Dataset):
         '''
         replace background pixel with random color in rendering
         '''
-        # print("LOADING IMAGE FROM", path)
-        try:
-            img = plt.imread(path)
-        except:
-            print(path)
-            sys.exit()
+        print("LOADING IMAGE FROM", path)
+        img = plt.imread(path)
         img[img[:, :, -1] == 0.] = color
         img = Image.fromarray(np.uint8(img[:, :, :3] * 255.))
         return img
@@ -321,19 +367,31 @@ class ObjaverseData(Dataset):
 
         # loads the corresponding images and camera pose matrices
         try:
-            target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_target), color))
-            cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_cond), color))
-            target_RT = np.load(os.path.join(filename, '%03d.npy' % index_target))
-            cond_RT = np.load(os.path.join(filename, '%03d.npy' % index_cond))
+            if self.heuristic:
+                target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % 0), color))
+                cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % 1), color))
+                target_RT = np.load(os.path.join(filename, '%03d.npy' % 0))
+                cond_RT = np.load(os.path.join(filename, '%03d.npy' % 1))
+            else:
+                target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_target), color))
+                cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_cond), color))
+                target_RT = np.load(os.path.join(filename, '%03d.npy' % index_target))
+                cond_RT = np.load(os.path.join(filename, '%03d.npy' % index_cond))
         except:
-            # very hacky solution, sorry about this
-            filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce') # this one we know is valid
-            target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_target), color))
-            cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_cond), color))
-            target_RT = np.load(os.path.join(filename, '%03d.npy' % index_target))
-            cond_RT = np.load(os.path.join(filename, '%03d.npy' % index_cond))
-            target_im = torch.zeros_like(target_im)
-            cond_im = torch.zeros_like(cond_im)
+            if self.heuristic:
+                # very hacky solution, sorry about this
+                filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce') # this one we know is valid
+                target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % 0), color))
+                cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % 1), color))
+                target_RT = np.load(os.path.join(filename, '%03d.npy' % 0))
+                cond_RT = np.load(os.path.join(filename, '%03d.npy' % 1))
+            else:
+                # very hacky solution, sorry about this
+                filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce') # this one we know is valid
+                target_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_target), color))
+                cond_im = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % index_cond), color))
+                target_RT = np.load(os.path.join(filename, '%03d.npy' % index_target))
+                cond_RT = np.load(os.path.join(filename, '%03d.npy' % index_cond))
 
         data["image_target"] = target_im # target view image tensor
         data["image_cond"] = cond_im # conditioning view image tensor
@@ -447,7 +505,7 @@ class MultiViewObjaverseData(Dataset):
         if not isinstance(ext, (tuple, list, ListConfig)):
             ext = [ext]
 
-        with open('/txining/zero123/objaverse-rendering/view_release/valid_paths.json') as f:
+        with open('/txining/zero123/objaverse-rendering/view_release/valid_paths_real.json') as f:
             self.paths = json.load(f)
             
         total_objects = len(self.paths)
@@ -501,12 +559,8 @@ class MultiViewObjaverseData(Dataset):
         '''
         replace background pixel with random color in rendering
         '''
-        # print("LOADING IMAGE FROM", path)
-        try:
-            img = plt.imread(path)
-        except:
-            print(path)
-            sys.exit()
+        print("LOADING IMAGE FROM", path)
+        img = plt.imread(path)
         img[img[:, :, -1] == 0.] = color
         img = Image.fromarray(np.uint8(img[:, :, :3] * 255.))
         return img
@@ -526,7 +580,10 @@ class MultiViewObjaverseData(Dataset):
         cond_RT4 = get_4x4_RT_matrix(cond_R, cond_t)
         return get_relative_RT(target_RT4, cond_RT4)
 
-    def get_target_cond(self, filename, color=[1., 1., 1., 1.]):
+    def get_target_cond(self, filename, select_all=False, color=None):
+
+        if color is None:
+            color = [1., 1., 1., 1.]
         cond_imgs = []
         cond_RTs = []
         target_img = None
@@ -535,52 +592,52 @@ class MultiViewObjaverseData(Dataset):
         # randomly selects 1 target view of the object
         index_target = random.randint(0, self.total_view - 1)
         
-        # randomly selects a number of conditioning views
-        num_cond_views = random.randint(1, self.total_view - 1)  
-        cond_indices = [i for i in range(self.total_view) if i != index_target]
-        cond_views = random.sample(cond_indices, num_cond_views)
-
-        # ensure that the target view is always the first one
-        views = [index_target] + cond_views
+        if select_all:
+            views = list(range(self.total_view))
+        else:
+            # randomly selects a number of conditioning views
+            num_cond_views = random.randint(1, self.total_view - 1)  
+            cond_indices = [i for i in range(self.total_view) if i != index_target]
+            cond_views = random.sample(cond_indices, num_cond_views)
+            views = [index_target] + cond_views
 
         for idx in views:
-            try:
-                img = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % idx), color))
-                RT = np.load(os.path.join(filename, '%03d.npy' % idx))
-                if idx == index_target:
-                    target_img = img
-                    target_RT = RT
-                else:
-                    cond_imgs.append(img)
-                    cond_RTs.append(RT)
-            except FileNotFoundError:
-                print(f"Missing file: {filename}")
-            except EOFError:
-                print(f"Corrupted file: {filename}")
+            print("LOADING FROM", os.path.join(filename, '%03d.png' % idx))
+            img = self.process_im(self.load_im(os.path.join(filename, '%03d.png' % idx), color))
+            RT = np.load(os.path.join(filename, '%03d.npy' % idx))
+            if idx == index_target:
+                target_img = img
+                target_RT = RT
+            else:
+                cond_imgs.append(img)
+                cond_RTs.append(RT)
+
         return target_img, target_RT, cond_imgs, cond_RTs
-        
+
     def __getitem__(self, index):
         data = {}
+        target_img, target_RT, cond_imgs, cond_RTs = None, None, [], []
 
-        filename = os.path.join(self.root_dir, self.paths[index])
-        if self.return_paths:
-            data["path"] = str(filename)
-
-        # handle missing files (need at least 1 target and 1 input image)
-        count = sum(1 for f in os.listdir(filename) if os.path.isfile(os.path.join(filename, f)))
-        if count < 4:
-            filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce')
-
-        target_img, target_RT, cond_imgs, cond_RTs = self.get_target_cond(filename)
-
-        while target_img is None or len(cond_imgs) == 0:
+        try:
+            filename = os.path.join(self.root_dir, self.paths[index])    
             target_img, target_RT, cond_imgs, cond_RTs = self.get_target_cond(filename)
 
-        # Stack conditioning images and RTs
-        data["image_target"] = target_img
-        data["image_cond"] = self.pad(torch.stack(cond_imgs, dim=0))  # (num_cond_views, C, H, W)
-        data["T"] = self.pad(torch.stack([self.get_T(target_RT, cond_RT) for cond_RT in cond_RTs], dim=0))
-        data["relative_RT4"] = self.pad(torch.stack([torch.tensor(self.get_relative_RT4(target_RT, cond_RT)) for cond_RT in cond_RTs], dim=0))
+            # Stack conditioning images and RTs
+            data["image_target"] = target_img
+            data["image_cond"] = self.pad(torch.stack(cond_imgs, dim=0))  # (num_cond_views, C, H, W)
+            data["T"] = self.pad(torch.stack([self.get_T(target_RT, cond_RT) for cond_RT in cond_RTs], dim=0))
+            data["relative_RT4"] = self.pad(torch.stack([torch.tensor(self.get_relative_RT4(target_RT, cond_RT)) for cond_RT in cond_RTs], dim=0))
+                
+        except Exception as e:
+            print(f"Error loading {filename}: {e}")
+            filename = os.path.join(self.root_dir, '660515f4ef554bb79da4d3bdf369a3ce')
+            target_img, target_RT, cond_imgs, cond_RTs = self.get_target_cond(filename)
+
+            # Stack conditioning images and RTs
+            data["image_target"] = target_img
+            data["image_cond"] = self.pad(torch.stack(cond_imgs, dim=0))  # (num_cond_views, C, H, W)
+            data["T"] = self.pad(torch.stack([self.get_T(target_RT, cond_RT) for cond_RT in cond_RTs], dim=0))
+            data["relative_RT4"] = self.pad(torch.stack([torch.tensor(self.get_relative_RT4(target_RT, cond_RT)) for cond_RT in cond_RTs], dim=0))
 
         if self.postprocess is not None:
             data = self.postprocess(data)
