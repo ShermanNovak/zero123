@@ -88,7 +88,6 @@ def sample_model(input_im, model, sampler, precision, h, w, ddim_steps, n_sample
             print("c.shape after cat", c.shape)
             c = model.cc_projection(c)
             print("model.cc_projection.weight", model.cc_projection.weight)
-            sys.exit()
             print("c.shape after projection", c.shape)
             cond = {}
             cond['c_crossattn'] = [c]

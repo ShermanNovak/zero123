@@ -3,7 +3,7 @@ from ldm.modules.evaluate.consistency import compute_geometric_consistency_appro
 import torch
 import numpy as np
 
-def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT, calc_latent_sim=False, calc_trans_sim=False):
+def compute_evaluation_metrics(batch_img_gt, batch_img_cond, batch_img_rec, batch_relative_RT, calc_latent_sim=False, calc_trans_sim=False):
     """
     Compute evaluation metrics for a batch of images.
     Args:
@@ -41,8 +41,8 @@ def compute_evaluation_metrics(batch_img_rec, batch_img_gt, batch_relative_RT, c
         psnr_scores.append(psnr_score)
 
     # Geometric consistency
-    gc_K = compute_geometric_consistency_with_K(batch_img_rec, batch_img_gt, batch_relative_RT)
-    gc_F = compute_geometric_consistency_approx_F(batch_img_rec, batch_img_gt)
+    gc_K = compute_geometric_consistency_with_K(batch_img_rec, batch_img_cond, batch_relative_RT)
+    gc_F = compute_geometric_consistency_approx_F(batch_img_rec, batch_img_cond)
 
     def avg_std(x):
         return float(np.nanmean(x)), float(np.nanstd(x))

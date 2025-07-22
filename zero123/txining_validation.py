@@ -11,11 +11,14 @@ from einops import rearrange
 
 from ldm.util import instantiate_from_config
 from ldm.modules.evaluate.evaluate import compute_evaluation_metrics
-from ldm.data.simple import ObjaverseDataModuleFromConfig, ObjaverseData
+from ldm.data.simple import ObjaverseDataModuleFromConfig, ObjaverseData, MultiViewObjaverseData
 
 # 1. Load config and instantiate model (adapt path as needed)
-config_path = "/txining/zero123/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml"  # <-- set this
-ckpt_path = "/txining/zero123/zero123/105000.ckpt"  # <-- set this
+# config_path = "/txining/zero123/zero123/configs/hybrid-vertical-heuristic.yaml"  # <-- set this
+# ckpt_path = "/txining/zero123/zero123/logs/2025-07-16T06-33-50_hybrid-vertical-heuristic/checkpoints/last.ckpt"  # <-- set this
+
+config_path = "/txining/zero123/zero123/configs/hybrid-multi.yaml"  # <-- set this
+ckpt_path = "/txining/zero123/zero123/logs/2025-07-17T01-56-27_hybrid-multi/checkpoints/last.ckpt"  # <-- set this
 
 config = OmegaConf.load(config_path)
 model = instantiate_from_config(config.model)
@@ -36,8 +39,12 @@ image_transforms.extend([transforms.ToTensor(),
                         transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
 image_transforms = torchvision.transforms.Compose(image_transforms)
 
-val_dataloader = wds.WebLoader(ObjaverseData(root_dir=data_cfg.params.root_dir, total_view=data_cfg.params.total_view, validation=True, test=False, \
-                                image_transforms=image_transforms), batch_size=data_cfg.params.batch_size, num_workers=data_cfg.params.num_workers, shuffle=False)
+val_dataloader = wds.WebLoader(
+                    MultiViewObjaverseData(root_dir=data_cfg.params.root_dir, total_view=data_cfg.params.total_view, validation=True, test=False, \
+                    image_transforms=image_transforms
+                    # , heuristic=True, view_paths_file='/txining/zero123/objaverse-rendering/view_release/valid_paths_heuristic.json'
+                    ), batch_size=data_cfg.params.batch_size, num_workers=data_cfg.params.num_workers, shuffle=False
+                )
 
 # 3. Evaluate with tqdm
 all_metrics = []
@@ -50,9 +57,11 @@ for batch in tqdm(val_dataloader, desc="Evaluating"):
         z, c, x_gt, xrec, xc = model.get_input(
             batch, model.first_stage_key, return_first_stage_outputs=True, force_c_encode=True, return_original_cond=True
         )
+        
         relative_RT4 = batch["relative_RT4"]
-        metrics = compute_evaluation_metrics(xrec, x_gt, relative_RT4)
+        metrics = compute_evaluation_metrics(x_gt, xc, xrec, relative_RT4, calc_latent_sim=False, calc_trans_sim=False)
         all_metrics.append(metrics)
+        print(metrics)
 
 # 4. Aggregate and plot
 def collect_metric(metric_name):
